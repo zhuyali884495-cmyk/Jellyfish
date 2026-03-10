@@ -33,6 +33,10 @@ class Base(DeclarativeBase):
 
 async def init_db() -> None:
     """创建所有表（开发/迁移用）。"""
+    # 确保 ORM 模型已导入，从而注册到 Base.metadata
+    import app.models.llm  # noqa: F401
+    import app.models.studio  # noqa: F401
+
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
 

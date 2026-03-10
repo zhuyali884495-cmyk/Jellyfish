@@ -3,7 +3,7 @@
 from app.core.db import Base
 from app.models.base import TimestampMixin
 
-from app.models.llm import Agent, Model, ModelSettings, Provider
+from app.models.llm import Model, ModelSettings, Provider
 from app.models.studio import (
     Actor,
     ActorImage,
@@ -58,7 +58,6 @@ __all__ = [
     "PromptTemplate",
     "FileItem",
     "TimelineClip",
-    "Agent",
     "Provider",
     "Model",
     "ModelSettings",

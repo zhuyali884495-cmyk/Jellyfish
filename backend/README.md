@@ -58,7 +58,36 @@ cp .env.example .env
 # 按需编辑 .env
 ```
 
-### 4. 启动服务
+### 4. 初始化数据库（可选，MySQL/PostgreSQL 等）
+
+如果你使用的是 **SQLite 默认配置**（`DATABASE_URL=sqlite+aiosqlite:///./jellyfish.db`），可以跳过本节，首次访问时会自动创建文件。
+
+若切换到 **MySQL / PostgreSQL 等外部数据库**，建议先手动初始化表结构：
+
+1. 在 `.env` 中配置数据库连接（示例）：
+
+   ```env
+   # SQLite（默认）
+   # DATABASE_URL=sqlite+aiosqlite:///./jellyfish.db
+
+   # MySQL（使用 aiomysql 驱动）
+   # DATABASE_URL=mysql+aiomysql://user:pass@localhost:3306/jellyfish
+
+   # PostgreSQL
+   # DATABASE_URL=postgresql+asyncpg://user:pass@localhost:5432/jellyfish
+   ```
+
+2. 运行初始化脚本（使用 uv）：
+
+   ```bash
+   cd backend
+   uv sync               # 确保依赖已安装
+   uv run python init_db.py
+   ```
+
+该脚本会导入所有 ORM 模型并调用 `Base.metadata.create_all()`，在目标数据库中创建所需的 27 张业务表。
+
+### 5. 启动服务
 
 ```bash
 uv run uvicorn app.main:app --reload --host 0.0.0.0 --port 8000

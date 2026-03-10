@@ -21,3 +21,4 @@ venv/
 htmlcov/
 .jellyfish.db
 jellyfish.db
+.env

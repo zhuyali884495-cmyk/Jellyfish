@@ -499,7 +499,7 @@ class Costume(Base, TimestampMixin):
     )
 
 
-class Shot(Base):
+class Shot(Base,TimestampMixin):
     """镜头表（基础信息）。
 
     说明：
@@ -572,7 +572,7 @@ class Shot(Base):
     )
 
 
-class ShotDetail(Base):
+class ShotDetail(Base,TimestampMixin):
     """镜头细节（1:1）。
 
     设计点：
@@ -642,7 +642,7 @@ class ShotDetail(Base):
     )
 
 
-class ShotDialogLine(Base):
+class ShotDialogLine(Base,TimestampMixin):
     """镜头对话行。
 
     设计点：
@@ -789,7 +789,7 @@ class Character(Base, TimestampMixin):
     )
 
 
-class CharacterPropLink(Base):
+class CharacterPropLink(Base,TimestampMixin):
     """角色与道具绑定（多对多）。
 
     应用层保证：
@@ -825,7 +825,7 @@ class CharacterPropLink(Base):
     )
 
 
-class ShotCharacterLink(Base):
+class ShotCharacterLink(Base,TimestampMixin):
     """镜头引用角色（多对多）。
 
     应用层保证：
@@ -1021,7 +1021,7 @@ class CostumeImage(Base, TimestampMixin):
     )
 
 
-class ShotActorImageLink(Base):
+class ShotActorImageLink(Base,TimestampMixin):
     """镜头引用演员形象/立绘（多对多）。
 
     应用层保证：
@@ -1045,7 +1045,7 @@ class ShotActorImageLink(Base):
     )
 
 
-class ShotSceneLink(Base):
+class ShotSceneLink(Base,TimestampMixin):
     """镜头引用场景（多对多）。
 
     应用层保证：
@@ -1069,7 +1069,7 @@ class ShotSceneLink(Base):
     )
 
 
-class ShotPropLink(Base):
+class ShotPropLink(Base,TimestampMixin):
     """镜头引用道具（多对多）。
 
     应用层保证：
@@ -1093,7 +1093,7 @@ class ShotPropLink(Base):
     )
 
 
-class ShotCostumeLink(Base):
+class ShotCostumeLink(Base,TimestampMixin):
     """镜头引用服装（多对多）。
 
     应用层保证：
@@ -1131,7 +1131,7 @@ class PromptCategory(str, Enum):
     combined = "combined"
 
 
-class PromptTemplate(Base):
+class PromptTemplate(Base,TimestampMixin):
     """提示词模板表。"""
 
     __tablename__ = "prompt_templates"
