@@ -1,5 +1,5 @@
 import { useEffect, useState, useCallback } from 'react'
-import { projects as mockProjects, chapters as mockChapters, type Project, type Chapter } from '../../../../../mocks/data'
+import { projects as mockProjects, chapters as mockChapters, type Project, type Chapter as MockChapter } from '../../../../../mocks/data'
 import { StudioChaptersService, StudioProjectsService } from '../../../../../services/generated'
 import type { ChapterRead, ProjectRead } from '../../../../../services/generated'
 
@@ -40,6 +40,10 @@ function toUIProject(p: ProjectRead): Project {
   }
 }
 
+export type Chapter = MockChapter & {
+  rawText?: string
+}
+
 function toUIChapter(c: ChapterRead): Chapter {
   return {
     id: c.id,
@@ -47,6 +51,7 @@ function toUIChapter(c: ChapterRead): Chapter {
     index: c.index,
     title: c.title,
     summary: c.summary ?? '',
+    rawText: c.raw_text ?? '',
     storyboardCount: c.storyboard_count ?? 0,
     status: c.status ?? 'draft',
     updatedAt: new Date().toISOString(),
@@ -90,6 +95,10 @@ export function useChapters(projectId: string | undefined) {
   const [chapters, setChapters] = useState<Chapter[]>([])
   const [loading, setLoading] = useState(true)
 
+  const patchChapterLocal = useCallback((chapterId: string, patch: Partial<Chapter>) => {
+    setChapters((prev) => prev.map((c) => (c.id === chapterId ? { ...c, ...patch } : c)))
+  }, [])
+
   const load = useCallback(async () => {
     if (!projectId) {
       setChapters([])
@@ -120,8 +129,8 @@ export function useChapters(projectId: string | undefined) {
     void load()
   }, [load])
 
-  return { chapters, loading, refresh: load }
+  return { chapters, loading, refresh: load, patchChapterLocal }
 }
 
 export { newId }
-export type { Project, Chapter }
+export type { Project }

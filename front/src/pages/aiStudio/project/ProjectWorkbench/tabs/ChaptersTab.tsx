@@ -15,7 +15,7 @@ export function ChaptersTab() {
   const navigate = useNavigate()
   const { projectId } = useParams<{ projectId: string }>()
   const [searchParams, setSearchParams] = useSearchParams()
-  const { chapters, loading, refresh } = useChapters(projectId)
+  const { chapters, loading, refresh, patchChapterLocal } = useChapters(projectId)
 
   const [editOpen, setEditOpen] = useState(false)
   const [editingChapter, setEditingChapter] = useState<Chapter | null>(null)
@@ -41,7 +41,7 @@ export function ChaptersTab() {
 
   const openEditModal = (chapter: Chapter) => {
     setEditingChapter(chapter)
-    setEditContent(chapter.summary || '')
+    setEditContent(chapter.rawText ?? '')
     setEditOpen(true)
   }
 
@@ -204,21 +204,41 @@ export function ChaptersTab() {
           setEditOpen(false)
           setEditingChapter(null)
         }}
-        onOk={() => {
-          message.success('已保存（Mock）')
-          setEditOpen(false)
-          setEditingChapter(null)
+        onOk={async () => {
+          if (!editingChapter) return
+          if (useMock) {
+            message.success('已保存（Mock）')
+            setEditOpen(false)
+            setEditingChapter(null)
+            return
+          }
+          try {
+            await StudioChaptersService.updateChapterApiV1StudioChaptersChapterIdPatch({
+              chapterId: editingChapter.id,
+              requestBody: {
+                raw_text: editContent,
+              },
+            })
+            patchChapterLocal(editingChapter.id, { rawText: editContent })
+            message.success('已保存')
+            setEditOpen(false)
+            setEditingChapter(null)
+            await refresh()
+          } catch {
+            message.error('保存失败')
+          }
         }}
         okText="保存"
-        width={560}
+        width={720}
       >
         <div>
-          <span className="text-gray-600 text-sm">内容编辑</span>
+          <span className="text-gray-600 text-sm">原文</span>
           <TextArea
-            rows={6}
+            rows={12}
             value={editContent}
             onChange={(e) => setEditContent(e.target.value)}
-            className="mt-1"
+            placeholder="章节原文内容"
+            className="mt-1 font-mono text-sm"
           />
         </div>
       </Modal>
