@@ -6,13 +6,16 @@ from __future__ import annotations
 将任务与上层业务实体（演员形象/道具/场景/服装/角色/镜头分镜帧）建立关联。
 """
 
-from enum import Enum
-from typing import Literal
+import base64
+import mimetypes
 
 from fastapi import APIRouter, Depends, HTTPException, status
+from langchain_core.prompts import PromptTemplate as LcPromptTemplate
 from pydantic import BaseModel, Field
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core import storage
 from app.core.db import async_session_maker
 from app.core.task_manager import DeliveryMode, SqlAlchemyTaskStore, TaskManager
 from app.core.task_manager.types import TaskStatus
@@ -23,15 +26,20 @@ from app.models.llm import Model, ModelCategoryKey, ModelSettings, Provider
 from app.models.studio import (
     ActorImage,
     ActorImageImage,
+    AssetViewAngle,
     Character,
     CharacterImage,
     Costume,
     CostumeImage,
+    PromptCategory,
+    PromptTemplate,
     Prop,
     PropImage,
     Scene,
     SceneImage,
     ShotDetail,
+    FileItem,
+    ShotFrameType,
     ShotFrameImage,
 )
 from app.models.task_links import GenerationTaskLink
@@ -142,6 +150,155 @@ def _prompt_from_description(description: str, *, not_found_msg: str) -> str:
     return prompt
 
 
+def _is_front_view(view_angle: AssetViewAngle | str | None) -> bool:
+    if view_angle is None:
+        return False
+    value = view_angle.value if hasattr(view_angle, "value") else str(view_angle)
+    return value == AssetViewAngle.front.value
+
+
+def _map_view_angle_for_prompt(view_angle: AssetViewAngle | str | None) -> str:
+    if view_angle is None:
+        return ""
+    raw = view_angle.value if hasattr(view_angle, "value") else str(view_angle)
+    view_angle_map = {
+        "RIGH": "纯右側面,严格右侧面，90度纯侧面轮廓，耳朵清晰可见",
+        "RIGHT": "纯右側面,严格右侧面，90度纯侧面轮廓，耳朵清晰可见",
+        "LEFT": "纯左侧面,严格左侧面，90度纯侧面轮廓，耳朵清晰可见",
+        "BACK": "正后方,正后方视角，完全背对镜头，只能看到后脑勺和后背",
+    }
+    return view_angle_map.get(raw, raw)
+
+
+async def _resolve_prompt_template(
+    db: AsyncSession,
+    *,
+    category: PromptCategory,
+) -> PromptTemplate | None:
+    stmt = (
+        select(PromptTemplate)
+        .where(PromptTemplate.category == category)
+        .order_by(PromptTemplate.is_default.desc(), PromptTemplate.updated_at.desc())
+        .limit(1)
+    )
+    result = await db.execute(stmt)
+    return result.scalars().first()
+
+
+def _render_prompt_template_content(
+    content: str,
+    *,
+    variables: dict[str, object],
+) -> str:
+    tmpl = LcPromptTemplate.from_template(content)
+    render_vars = {k: str(variables.get(k, "")) for k in tmpl.input_variables}
+    return tmpl.format(**render_vars).strip()
+
+
+async def _build_prompt_with_template(
+    db: AsyncSession,
+    *,
+    category: PromptCategory,
+    variables: dict[str, object],
+    fallback_prompt: str,
+    not_found_msg: str,
+) -> str:
+    template = await _resolve_prompt_template(db, category=category)
+    if template is not None and template.content:
+        rendered = _render_prompt_template_content(template.content, variables=variables)
+        if rendered:
+            return rendered
+    return _prompt_from_description(fallback_prompt, not_found_msg=not_found_msg)
+
+
+async def _resolve_front_image_ref(
+    db: AsyncSession,
+    *,
+    image_model: type,
+    parent_field_name: str,
+    parent_id: str,
+    preferred_quality_level: object | None,
+) -> dict[str, str] | None:
+    parent_field = getattr(image_model, parent_field_name)
+    stmt = (
+        select(image_model)
+        .where(
+            parent_field == parent_id,
+            image_model.view_angle == AssetViewAngle.front,
+            image_model.file_id.is_not(None),
+        )
+        .order_by(image_model.created_at.desc(), image_model.id.desc())
+    )
+    result = await db.execute(stmt)
+    rows = result.scalars().all()
+    if not rows:
+        return None
+
+    target = rows[0]
+    if preferred_quality_level is not None:
+        for row in rows:
+            if row.quality_level == preferred_quality_level:
+                target = row
+                break
+
+    if not target.file_id:
+        return None
+
+    file_obj = await db.get(FileItem, target.file_id)
+    if file_obj is None or not file_obj.storage_key:
+        return None
+
+    try:
+        content = await storage.download_file(key=file_obj.storage_key)
+    except Exception:  # noqa: BLE001
+        return None
+    if not content:
+        return None
+
+    content_type: str | None = None
+    try:
+        info = await storage.get_file_info(key=file_obj.storage_key)
+        content_type = (info.content_type or "").strip().lower() or None
+    except Exception:  # noqa: BLE001
+        content_type = None
+
+    if not content_type:
+        guessed_type, _ = mimetypes.guess_type(file_obj.storage_key)
+        content_type = (guessed_type or "").strip().lower() or None
+
+    if not content_type or not content_type.startswith("image/"):
+        content_type = "image/png"
+
+    image_format = content_type.split("/", 1)[1].split(";", 1)[0].strip().lower() or "png"
+    encoded = base64.b64encode(content).decode("ascii")
+    data_url = f"data:image/{image_format};base64,{encoded}"
+    return {"image_url": data_url}
+
+
+def _asset_prompt_category(
+    *,
+    relation_type: str,
+    is_front_view: bool,
+) -> PromptCategory:
+    mapping = {
+        "actor_image_image": (PromptCategory.actor_image_front, PromptCategory.actor_image_other),
+        "prop_image": (PromptCategory.prop_front, PromptCategory.prop_other),
+        "scene_image": (PromptCategory.scene_front, PromptCategory.scene_other),
+        "costume_image": (PromptCategory.costume_front, PromptCategory.costume_other),
+    }
+    front_category, other_category = mapping[relation_type]
+    return front_category if is_front_view else other_category
+
+
+def _shot_frame_prompt_category(frame_type: ShotFrameType | str) -> PromptCategory:
+    value = frame_type.value if hasattr(frame_type, "value") else str(frame_type)
+    if value == ShotFrameType.first.value:
+        return PromptCategory.frame_head
+    if value == ShotFrameType.last.value:
+        return PromptCategory.frame_tail
+    return PromptCategory.frame_key
+
+
 async def _create_image_task_and_link(
     *,
     db: AsyncSession,
@@ -149,6 +306,7 @@ async def _create_image_task_and_link(
     relation_type: str,
     relation_entity_id: str,
     prompt: str,
+    images: list[dict[str, str]] | None = None,
 ) -> TaskCreated:
     """创建图片生成任务，并在 `GenerationTaskLink` 中建立关联；Provider 由解析出的 Model 反查。"""
     store = SqlAlchemyTaskStore(db)
@@ -167,6 +325,8 @@ async def _create_image_task_and_link(
             "model": model.name,
         },
     }
+    if images:
+        run_args["input"]["images"] = images
 
     task_record = await tm.create(
         task=_CreateOnlyTask(),
@@ -349,13 +509,45 @@ async def create_actor_image_generation_task(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="image_id does not belong to given actor_image_id",
         )
-    prompt = _prompt_from_description(actor_image.description, not_found_msg="ActorImage.description is empty")
+    is_front_view = _is_front_view(image_row.view_angle)
+    category = _asset_prompt_category(
+        relation_type="actor_image_image",
+        is_front_view=is_front_view,
+    )
+    prompt = await _build_prompt_with_template(
+        db,
+        category=category,
+        variables={
+            "name": actor_image.name,
+            "description": actor_image.description,
+            "tags": ", ".join(actor_image.tags or []),
+            "view_angle": _map_view_angle_for_prompt(image_row.view_angle),
+            "quality_level": image_row.quality_level,
+            "format": image_row.format,
+        },
+        fallback_prompt=actor_image.description,
+        not_found_msg="ActorImage.description is empty",
+    )
+    
     created = await _create_image_task_and_link(
         db=db,
         model_id=body.model_id,
         relation_type="actor_image_image",
         relation_entity_id=str(image_row.id),
         prompt=prompt,
+        images=(
+            []
+            if is_front_view
+            else [ref]
+            if (ref := await _resolve_front_image_ref(
+                db,
+                image_model=ActorImageImage,
+                parent_field_name="actor_image_id",
+                parent_id=actor_image_id,
+                preferred_quality_level=image_row.quality_level,
+            ))
+            else []
+        ),
     )
     return success_response(created, code=201)
 
@@ -396,7 +588,38 @@ async def create_asset_image_generation_task(
                 detail="image_id does not belong to given prop_id",
             )
         relation_type = "prop_image"
-        prompt = _prompt_from_description(asset.description, not_found_msg="Prop.description is empty")
+        is_front_view = _is_front_view(image_row.view_angle)
+        category = _asset_prompt_category(
+            relation_type=relation_type,
+            is_front_view=is_front_view,
+        )
+        prompt = await _build_prompt_with_template(
+            db,
+            category=category,
+            variables={
+                "name": asset.name,
+                "description": asset.description,
+                "tags": ", ".join(asset.tags or []),
+                "view_angle": _map_view_angle_for_prompt(image_row.view_angle),
+                "quality_level": image_row.quality_level,
+                "format": image_row.format,
+            },
+            fallback_prompt=asset.description,
+            not_found_msg="Prop.description is empty",
+        )
+        images = (
+            []
+            if is_front_view
+            else [ref]
+            if (ref := await _resolve_front_image_ref(
+                db,
+                image_model=PropImage,
+                parent_field_name="prop_id",
+                parent_id=asset_id,
+                preferred_quality_level=image_row.quality_level,
+            ))
+            else []
+        )
     elif asset_type_norm == "scene":
         asset = await db.get(Scene, asset_id)
         if asset is None:
@@ -408,7 +631,38 @@ async def create_asset_image_generation_task(
                 detail="image_id does not belong to given scene_id",
             )
         relation_type = "scene_image"
-        prompt = _prompt_from_description(asset.description, not_found_msg="Scene.description is empty")
+        is_front_view = _is_front_view(image_row.view_angle)
+        category = _asset_prompt_category(
+            relation_type=relation_type,
+            is_front_view=is_front_view,
+        )
+        prompt = await _build_prompt_with_template(
+            db,
+            category=category,
+            variables={
+                "name": asset.name,
+                "description": asset.description,
+                "tags": ", ".join(asset.tags or []),
+                "view_angle": _map_view_angle_for_prompt(image_row.view_angle),
+                "quality_level": image_row.quality_level,
+                "format": image_row.format,
+            },
+            fallback_prompt=asset.description,
+            not_found_msg="Scene.description is empty",
+        )
+        images = (
+            []
+            if is_front_view
+            else [ref]
+            if (ref := await _resolve_front_image_ref(
+                db,
+                image_model=SceneImage,
+                parent_field_name="scene_id",
+                parent_id=asset_id,
+                preferred_quality_level=image_row.quality_level,
+            ))
+            else []
+        )
     elif asset_type_norm == "costume":
         asset = await db.get(Costume, asset_id)
         if asset is None:
@@ -420,7 +674,38 @@ async def create_asset_image_generation_task(
                 detail="image_id does not belong to given costume_id",
             )
         relation_type = "costume_image"
-        prompt = _prompt_from_description(asset.description, not_found_msg="Costume.description is empty")
+        is_front_view = _is_front_view(image_row.view_angle)
+        category = _asset_prompt_category(
+            relation_type=relation_type,
+            is_front_view=is_front_view,
+        )
+        prompt = await _build_prompt_with_template(
+            db,
+            category=category,
+            variables={
+                "name": asset.name,
+                "description": asset.description,
+                "tags": ", ".join(asset.tags or []),
+                "view_angle": _map_view_angle_for_prompt(image_row.view_angle),
+                "quality_level": image_row.quality_level,
+                "format": image_row.format,
+            },
+            fallback_prompt=asset.description,
+            not_found_msg="Costume.description is empty",
+        )
+        images = (
+            []
+            if is_front_view
+            else [ref]
+            if (ref := await _resolve_front_image_ref(
+                db,
+                image_model=CostumeImage,
+                parent_field_name="costume_id",
+                parent_id=asset_id,
+                preferred_quality_level=image_row.quality_level,
+            ))
+            else []
+        )
     else:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -433,6 +718,7 @@ async def create_asset_image_generation_task(
         relation_type=relation_type,
         relation_entity_id=str(body.image_id),
         prompt=prompt,
+        images=images,
     )
     return success_response(created, code=201)
 
@@ -467,7 +753,19 @@ async def create_character_image_generation_task(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="image_id does not belong to given character_id",
         )
-    prompt = _prompt_from_description(character.description, not_found_msg="Character.description is empty")
+    prompt = await _build_prompt_with_template(
+        db,
+        category=PromptCategory.combined,
+        variables={
+            "name": character.name,
+            "description": character.description,
+            "view_angle": _map_view_angle_for_prompt(image_row.view_angle),
+            "quality_level": image_row.quality_level,
+            "format": image_row.format,
+        },
+        fallback_prompt=character.description,
+        not_found_msg="Character.description is empty",
+    )
     created = await _create_image_task_and_link(
         db=db,
         model_id=body.model_id,
@@ -520,6 +818,25 @@ async def create_shot_frame_image_generation_task(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="ShotDetail has no frame prompt (key/first/last are all empty)",
         )
+    prompt = await _build_prompt_with_template(
+        db,
+        category=_shot_frame_prompt_category(image_row.frame_type),
+        variables={
+            "description": shot_detail.description,
+            "atmosphere": shot_detail.atmosphere,
+            "mood_tags": ", ".join(shot_detail.mood_tags or []),
+            "camera_shot": shot_detail.camera_shot,
+            "angle": shot_detail.angle,
+            "movement": shot_detail.movement,
+            "frame_type": image_row.frame_type,
+            "first_frame_prompt": shot_detail.first_frame_prompt,
+            "last_frame_prompt": shot_detail.last_frame_prompt,
+            "key_frame_prompt": shot_detail.key_frame_prompt,
+            "base_prompt": prompt,
+        },
+        fallback_prompt=prompt,
+        not_found_msg="ShotDetail has no frame prompt (key/first/last are all empty)",
+    )
     created = await _create_image_task_and_link(
         db=db,
         model_id=body.model_id,
